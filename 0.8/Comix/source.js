@@ -217,6 +217,50 @@
   // ---------------------------------------------------------------------------
   // Request signing (canonicalization must match the site's secure module)
   // ---------------------------------------------------------------------------
+  // The image CDN serves some images with the first N bytes XOR-obfuscated; the
+  // seed/length/algorithm come in x-enc-* response headers (the same scheme the
+  // 0.9 extension undoes in its response interceptor).
+  function parseEncHeaders(headers) {
+    var seed, len, algo;
+    for (var k in headers) {
+      if (!Object.prototype.hasOwnProperty.call(headers, k)) { continue; }
+      var lk = String(k).toLowerCase();
+      if (lk === "x-enc-seed") { seed = headers[k]; }
+      else if (lk === "x-enc-len") { len = headers[k]; }
+      else if (lk === "x-enc-algo") { algo = headers[k]; }
+    }
+    if (seed === undefined || len === undefined) { return null; }
+    var s = Number(seed), l = Number(len);
+    if (!isFinite(s) || s <= 0 || !isFinite(l) || l <= 0) { return null; }
+    var a = parseInt(algo === undefined ? "" : String(algo), 10);
+    return { seed: s >>> 0, len: Math.floor(l), algo: isFinite(a) ? a : 1 };
+  }
+  function xorDecrypt(bytes, meta) {
+    var n = Math.min(meta.len, bytes.length);
+    if (meta.algo === 2) {
+      var x = (meta.seed | 1) >>> 0;
+      for (var i = 0; i < n; i++) {
+        x ^= x << 13; x >>>= 0;
+        x ^= x >>> 17;
+        x ^= x << 5; x >>>= 0;
+        bytes[i] ^= x & 255;
+      }
+    } else {
+      var v = meta.seed >>> 0;
+      for (var j = 0; j < n; j++) {
+        v = (Math.imul(v, 1000005) + 1234567891) >>> 0;
+        bytes[j] ^= (v >>> 24) & 255;
+      }
+    }
+    return bytes;
+  }
+  function hasScrambleHeaders(headers) {
+    for (var k in headers) {
+      if (Object.prototype.hasOwnProperty.call(headers, k) && String(k).toLowerCase() === "x-scramble-seed") { return true; }
+    }
+    return false;
+  }
+
   function decodeComponent(s) {
     try { return decodeURIComponent(s.replace(/\+/g, " ")); }
     catch (e) { return s; }
@@ -386,7 +430,7 @@
   // Extension
   // ---------------------------------------------------------------------------
   var ComixInfo = {
-    version: "1.2.6",
+    version: "1.2.7",
     name: "Comix",
     description: "Extension that pulls manga from comix.to. Converted from the Aidoku Comix source.",
     author: "converted",
@@ -435,7 +479,26 @@
             } catch (e) { /* ignore cookie errors */ }
             return request;
           },
-          interceptResponse: async (response) => response,
+          interceptResponse: async (response) => {
+            try {
+              var rurl = String((response.request && response.request.url) || "");
+              if (rurl.indexOf("/api/v1/") < 0) {
+                var hdrs = response.headers || {};
+                var meta = parseEncHeaders(hdrs);
+                if (meta && response.rawData) {
+                  var raw = response.rawData;
+                  var view = (raw instanceof ArrayBuffer) ? new Uint8Array(raw) : new Uint8Array(raw.buffer || raw);
+                  xorDecrypt(view, meta);
+                  response.rawData = view.buffer;
+                } else if (meta) {
+                  console.log("[Comix] image has x-enc headers but no rawData to decrypt: " + rurl);
+                } else if (hasScrambleHeaders(hdrs)) {
+                  console.log("[Comix] image is tile-scrambled (x-scramble-*); cannot be descrambled on Paperback 0.8: " + rurl);
+                }
+              }
+            } catch (e) { console.log("[Comix] image decode failed: " + (e && e.message)); }
+            return response;
+          },
         },
       });
       this.stateManager = App.createSourceStateManager();
@@ -452,13 +515,14 @@
       var v = await this.stateManager.retrieve("poster_quality");
       return v === "medium" ? "medium" : "large";
     };
-    // Whether image/CDN requests also carry the comix.to Referer (default: yes, like
-    // the working WeebCentral source). Toggle off in settings if images then break.
+    // Whether image/CDN requests also carry the comix.to Referer. Default: no - the
+    // working 0.9 extension sends no Referer on any request. Switch on in settings
+    // only if images fail to load.
     Comix.prototype.getSendImageReferer = async function () {
       if (this.imageRefererCache !== undefined) { return this.imageRefererCache; }
       var v;
       try { v = await this.stateManager.retrieve("image_referer"); } catch (e) { v = undefined; }
-      var on = (v === undefined || v === null) ? true : (v === true || v === "true" || v === 1);
+      var on = (v === true || v === "true" || v === 1);
       this.imageRefererCache = on;
       return on;
     };
@@ -665,9 +729,44 @@
       return BASE_URL + "/title/" + mangaId;
     };
 
+    // The title page embeds the manga detail JSON in <script id="initial-data">
+    // (the 0.9 extension reads it the same way). No signed API call needed, so it
+    // costs no API budget and keeps working while the API is rate-limiting.
+    Comix.prototype.getMangaDetailsFromHtml = async function (mangaId) {
+      var request = App.createRequest({
+        url: BASE_URL + "/title/" + mangaId,
+        method: "GET",
+        headers: { "Accept": "text/html,application/xhtml+xml" },
+      });
+      var response = await this.requestManager.schedule(request, RETRY);
+      this.checkResponseError(response);
+      var $ = this.cheerio.load(String(response.data || ""));
+      var text = $("script#initial-data").text();
+      if (!text) { return null; }
+      var queries;
+      try { queries = JSON.parse(text).queries; } catch (e) { return null; }
+      if (!queries) { return null; }
+      var keys = Object.keys(queries);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i].indexOf('"detail"') >= 0) {
+          var q = queries[keys[i]];
+          var d = q && q.result ? q.result : q;
+          return d && d.hid !== undefined ? d : null;
+        }
+      }
+      return null;
+    };
+
     Comix.prototype.getMangaDetails = async function (mangaId) {
-      var body = await this.apiGet("/manga/" + mangaId, [["includes", ["author", "artist"]]]);
-      var data = body.result || {};
+      var data = null;
+      try { data = await this.getMangaDetailsFromHtml(mangaId); }
+      catch (e) {
+        if (/verify you're human|CLOUDFLARE BYPASS/.test(String(e && e.message))) { throw e; }
+      }
+      if (!data) {
+        var body = await this.apiGet("/manga/" + mangaId, [["includes", ["author", "artist"]]]);
+        data = body.result || {};
+      }
       var ratingMax = await this.getRatingMax();
       var sections = [];
       var mkSection = function (id, label, items) {
