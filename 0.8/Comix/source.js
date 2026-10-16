@@ -177,10 +177,10 @@
   // Home sections, fetched one at a time (see the API request gate) and rendered as
   // each one arrives.
   var HOME_SECTIONS = [
-    { id: "trending", title: "Trending Now", type: "featured", containsMoreItems: false, path: "/manga/top", params: [["type", "trending"], ["days", "30"], ["limit", "20"]] },
-    { id: "latest", title: "Latest Updates", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[chapter_updated_at]", "desc"], ["limit", "20"]] },
-    { id: "new", title: "Recently Added", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[created_at]", "desc"], ["limit", "20"]] },
-    { id: "follows", title: "Most Followed", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[follows_total]", "desc"], ["limit", "20"]] },
+    { id: "trending", title: "Trending Now", type: "featured", containsMoreItems: false, path: "/manga/top", params: [["type", "trending"], ["days", "30"], ["limit", "20"]], browse: [["order[views_30d]", "desc"]] },
+    { id: "latest", title: "Latest Updates", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[chapter_updated_at]", "desc"], ["limit", "20"]], browse: [["order[chapter_updated_at]", "desc"]] },
+    { id: "new", title: "Recently Added", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[created_at]", "desc"], ["limit", "20"]], browse: [["order[created_at]", "desc"]] },
+    { id: "follows", title: "Most Followed", type: "singleRowNormal", containsMoreItems: true, path: "/manga", params: [["order[follows_total]", "desc"], ["limit", "20"]], browse: [["order[follows_total]", "desc"]] },
   ];
 
   // comix.to blocks clients that page chapter lists faster than ~2.5s (Mihon's pacer value).
@@ -430,7 +430,7 @@
   // Extension
   // ---------------------------------------------------------------------------
   var ComixInfo = {
-    version: "1.2.7",
+    version: "1.2.8",
     name: "Comix",
     description: "Extension that pulls manga from comix.to. Converted from the Aidoku Comix source.",
     author: "converted",
@@ -1020,6 +1020,38 @@
       return sections;
     };
 
+    // -------------------------------------------------------------------------
+    // HTML browse path
+    // The site's own pages embed their data in <script id="initial-data"> (the
+    // same objects its API returns). Reading those pages costs no API budget and
+    // keeps working while the API itself is rate-limited - the same architecture
+    // the Mihon extension uses. Every HTML path falls back to the signed API, so
+    // a layout change cannot break the source.
+    // -------------------------------------------------------------------------
+    Comix.prototype.browseFromHtml = async function (queryParams) {
+      var query = buildQuery(queryParams || []);
+      var request = App.createRequest({
+        url: BASE_URL + "/browse" + (query ? "?" + query : ""),
+        method: "GET",
+        headers: { "Accept": "text/html,application/xhtml+xml" },
+      });
+      var response = await this.requestManager.schedule(request, RETRY);
+      this.checkResponseError(response);
+      var $ = this.cheerio.load(String(response.data || ""));
+      var text = $("script#initial-data").text();
+      if (!text) { return null; }
+      var queries;
+      try { queries = JSON.parse(text).queries; } catch (e) { return null; }
+      if (!queries) { return null; }
+      var keys = Object.keys(queries);
+      for (var i = 0; i < keys.length; i++) {
+        var value = queries[keys[i]];
+        var res = value && (value.result || value);
+        if (res && Array.isArray(res.items) && res.items.length) { return res; }
+      }
+      return null;
+    };
+
     Comix.prototype.getSearchResults = async function (query, metadata) {
       var page = metadata && metadata.page ? metadata.page : 1;
       var params = [];
@@ -1081,8 +1113,13 @@
       params.push(["limit", "20"]);
 
       var ratingMax = await this.getRatingMax();
-      var body = await this.apiGet("/manga", params);
-      var res = body.result || {};
+      // Browse page first (no API budget); the signed API is the fallback.
+      var res = null;
+      try { res = await this.browseFromHtml(params); } catch (e) { res = null; }
+      if (!res) {
+        var body = await this.apiGet("/manga", params);
+        res = body.result || {};
+      }
       var items = this.filterByRating(resultItems(res), ratingMax);
       var partials = [];
       for (var k = 0; k < items.length; k++) { partials.push(await this.partialManga(items[k], ratingMax)); }
@@ -1139,8 +1176,17 @@
       for (var i = 0; i < HOME_SECTIONS.length; i++) {
         var def = HOME_SECTIONS[i];
         try {
-          var body = await self.apiGet(def.path, def.params);
-          data[def.id] = resultItems(body.result);
+          // Browse page first (no API budget); the signed API is the fallback.
+          var items = null;
+          try {
+            var htmlRes = await self.browseFromHtml(def.browse);
+            if (htmlRes) { items = resultItems(htmlRes); }
+          } catch (e2) { items = null; }
+          if (!items) {
+            var body = await self.apiGet(def.path, def.params);
+            items = resultItems(body.result);
+          }
+          data[def.id] = items;
           await self.buildHomeSection(def, data[def.id], sectionCallback, ratingMax);
         } catch (e) {
           data[def.id] = [];
@@ -1168,15 +1214,21 @@
     Comix.prototype.getViewMoreItems = async function (homepageSectionId, metadata) {
       var page = metadata && metadata.page ? metadata.page : 1;
       var params;
+      var browseParams;
       switch (homepageSectionId) {
-        case "latest": params = [["order[chapter_updated_at]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
-        case "new": params = [["order[created_at]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
-        case "follows": params = [["order[follows_total]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
+        case "latest": browseParams = [["order[chapter_updated_at]", "desc"], ["page", String(page)]]; params = [["order[chapter_updated_at]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
+        case "new": browseParams = [["order[created_at]", "desc"], ["page", String(page)]]; params = [["order[created_at]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
+        case "follows": browseParams = [["order[follows_total]", "desc"], ["page", String(page)]]; params = [["order[follows_total]", "desc"], ["limit", "20"], ["page", String(page)]]; break;
         default: return App.createPagedResults({ results: [], metadata: undefined });
       }
       var ratingMax = await this.getRatingMax();
-      var body = await this.apiGet("/manga", params);
-      var res = body.result || {};
+      // Browse page first (no API budget); the signed API is the fallback.
+      var res = null;
+      try { res = await this.browseFromHtml(browseParams); } catch (e) { res = null; }
+      if (!res) {
+        var body = await this.apiGet("/manga", params);
+        res = body.result || {};
+      }
       var items = this.filterByRating(resultItems(res), ratingMax);
       var partials = [];
       for (var i = 0; i < items.length; i++) { partials.push(await this.partialManga(items[i], ratingMax)); }
