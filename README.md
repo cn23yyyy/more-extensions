@@ -2,12 +2,14 @@
 
 Paperback 0.8 extensions — ports of their Paperback 0.9 counterparts, adapted for 0.8:
 
-- **Comix** — comix.to (embedded site secure module, signed requests; see the comix-extensions repo for details)
 - **MangaDex** — api.mangadex.org
 - **MangaFire** — mangafire.to (requests are signed with the site's own protection module, embedded)
 
-**MangaNato** was removed from this repository (it did not work reliably against manganato.gg's
-Cloudflare protection). Its files remain in the repository history and it can be re-added later.
+**Removed**: **Comix** (comix.to) and **MangaNato** (manganato.gg) were removed from this
+repository — comix.to's WAF blocks extension clients after a small number of requests and now
+serves Cloudflare Turnstile checks that Paperback 0.8 cannot solve in-app, and manganato.gg's
+Cloudflare protection made it unreliable. Their files remain in the repository history and can be
+re-added later.
 
 ## Add to Paperback
 
