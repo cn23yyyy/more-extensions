@@ -449,7 +449,7 @@ MQqK9pLKe/g/IjwPU8lLaxj0wENLv7ycibixgCI/+FbcV6rnPGRDiq52DdZx+dlv9jdcfd7ei8+0jXZ
   // Extension
   // ---------------------------------------------------------------------------
   var MangaFireInfo = {
-    version: "1.0.0",
+    version: "1.0.1",
     name: "MangaFire",
     description: "Extension that pulls content from mangafire.to. Converted from the Aidoku MangaFire source.",
     author: "converted",
@@ -631,7 +631,10 @@ MQqK9pLKe/g/IjwPU8lLaxj0wENLv7ycibixgCI/+FbcV6rnPGRDiq52DdZx+dlv9jdcfd7ei8+0jXZ
         return App.createTagSection({
           id: id,
           label: label,
-          tags: items.map(function (t) { return App.createTag({ id: prefix + t.id, label: t.title }); }),
+          // SORT_OPTIONS entries use `label` while the other constants use `title`;
+          // an undefined label breaks the app's tag validation when the search UI
+          // opens ("Invalid type for key tags").
+          tags: items.map(function (t) { return App.createTag({ id: prefix + t.id, label: String(t.title || t.label || t.id) }); }),
         });
       }
       return [
@@ -685,7 +688,10 @@ MQqK9pLKe/g/IjwPU8lLaxj0wENLv7ycibixgCI/+FbcV6rnPGRDiq52DdZx+dlv9jdcfd7ei8+0jXZ
       if (themes.length) { params.theme_ids = themes; }
       if (demos.length) { params.demographics = demos; }
       if (statuses.length) { params.statuses = statuses; }
-      params.content_rating = (ratings.length ? ratings : DEFAULT_CONTENT_RATINGS).join(",");
+      // The API rejects the comma-joined string form (422 "content_rating.0 is
+      // invalid") and accepts the repeated-array form - pass an array so
+      // serializeParams renders content_rating[]=safe&content_rating[]=...
+      params.content_rating = (ratings.length ? ratings : DEFAULT_CONTENT_RATINGS);
       params.sort = sort;
 
       var body = await this.apiGet("/titles", params);
