@@ -2,9 +2,12 @@
 
 Paperback 0.8 extensions — ports of their Paperback 0.9 counterparts, adapted for 0.8:
 
-- **MangaFire** — mangafire.to (requests are signed with the site's own protection module, embedded)
+- **Comix** — comix.to (embedded site secure module, signed requests; see the comix-extensions repo for details)
 - **MangaDex** — api.mangadex.org
-- **MangaNato** — manganato.gg
+- **MangaFire** — mangafire.to (requests are signed with the site's own protection module, embedded)
+
+**MangaNato** was removed from this repository (it did not work reliably against manganato.gg's
+Cloudflare protection). Its files remain in the repository history and it can be re-added later.
 
 ## Add to Paperback
 
