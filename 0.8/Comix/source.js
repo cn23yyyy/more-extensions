@@ -361,7 +361,7 @@
   // Pinning "0" ourselves made traffic look less like the site's client, not more.
   // ---------------------------------------------------------------------------
   var API_MIN_GAP_MS = (typeof process !== "undefined" && process && process.env && process.env.COMIX_API_GAP_MS !== undefined)
-    ? Number(process.env.COMIX_API_GAP_MS) : 250;
+    ? Number(process.env.COMIX_API_GAP_MS) : 600;
   var API_RETRY_DELAY_MS = (typeof process !== "undefined" && process && process.env && process.env.COMIX_RETRY_DELAY_MS !== undefined)
     ? Number(process.env.COMIX_RETRY_DELAY_MS) : 1500;
   var API_MAX_ATTEMPTS = 3;
@@ -386,7 +386,7 @@
   // Extension
   // ---------------------------------------------------------------------------
   var ComixInfo = {
-    version: "1.2.5",
+    version: "1.2.6",
     name: "Comix",
     description: "Extension that pulls manga from comix.to. Converted from the Aidoku Comix source.",
     author: "converted",
@@ -716,7 +716,7 @@
       // The chapter-list endpoint is the most captcha-sensitive one on comix.to.
       // Serve a recent list from cache so quick re-opens don't re-trigger the WAF,
       // and keep a stale list around as a fallback for when the site is blocking.
-      var CHAP_CACHE_TTL = 10 * 60 * 1000;
+      var CHAP_CACHE_TTL = 60 * 60 * 1000;
       var cachedEntry = null;
       try {
         var cachedRaw = await this.stateManager.retrieve("chapters_cache_v3");
@@ -755,6 +755,22 @@
           var items = res.items || [];
           for (var i = 0; i < items.length; i++) { chapters.push(items[i]); }
           lastPage = res.meta && res.meta.lastPage ? res.meta.lastPage : 1;
+          // Budget saver: when the newest page already overlaps the cached list, the
+          // cached list already holds everything older - merge the new chapters onto
+          // it and stop paginating (1 request instead of up to a dozen for long
+          // series, which is what exhausts comix.to's request budget fastest).
+          if (page === 1 && items.length && cachedEntry) {
+            var known = {};
+            for (var k = 0; k < cachedEntry.items.length; k++) { known[String(cachedEntry.items[k].id)] = true; }
+            if (known[String(items[items.length - 1].id)]) {
+              var fetched = {};
+              for (var f = 0; f < chapters.length; f++) { fetched[String(chapters[f].id)] = true; }
+              for (var c = 0; c < cachedEntry.items.length; c++) {
+                if (!fetched[String(cachedEntry.items[c].id)]) { chapters.push(cachedEntry.items[c]); }
+              }
+              lastPage = 1; // done - the merged list is complete
+            }
+          }
           page++;
           if (!items.length) { break; }
           // comix.to blocks clients that page chapter lists faster than ~2.5s
@@ -1004,7 +1020,7 @@
       // open costs 4 API requests (comix.to dislikes bursts). The cache is also a
       // fallback while the site is blocking, so the page shows the last known content
       // instead of empty section headers.
-      var HOME_CACHE_TTL = 15 * 60 * 1000;
+      var HOME_CACHE_TTL = 30 * 60 * 1000;
       var ratingMax = await this.getRatingMax();
       var self = this;
       var cached = null;
